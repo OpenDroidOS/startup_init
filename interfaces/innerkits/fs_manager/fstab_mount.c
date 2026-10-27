@@ -752,7 +752,7 @@ INIT_STATIC int MountItemByFsType(FstabItem *item, MountResult *result)
             }
             rc = DoMountOneItem(item, result);
             if (rc == 0 && strcmp(item->mountPoint, "/usr") == 0) {
-                SwitchRoot("/usr");
+                rc = SwitchRoot("/usr");
             }
             return rc;
         } else {
@@ -764,7 +764,7 @@ INIT_STATIC int MountItemByFsType(FstabItem *item, MountResult *result)
     if (strcmp(item->fsType, "erofs") != 0) {
         int rc = DoMountOneItem(item, result);
         if (rc == 0 && strcmp(item->mountPoint, "/usr") == 0) {
-            SwitchRoot("/usr");
+            rc = SwitchRoot("/usr");
         }
         return rc;
     }
@@ -974,7 +974,7 @@ int MountOneItem(FstabItem *item)
 #else
     rc = DoMountOneItem(item, &result);
     if (rc == 0 && (strcmp(item->mountPoint, "/usr") == 0)) {
-        SwitchRoot("/usr");
+        rc = SwitchRoot("/usr");
     }
 #endif
 
@@ -1100,7 +1100,7 @@ int MountAllWithFstab(const Fstab *fstab, bool required)
 
     for (item = fstab->head; item != NULL; item = item->next) {
         rc = CheckRequiredAndMount(item, required);
-        if (required && (rc < 0)) { // Init fail to mount in the first stage and exit directly.
+        if (required && (rc != 0)) { // Preserve the first required mount failure.
             break;
         }
     }
