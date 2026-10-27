@@ -120,7 +120,7 @@ static void SetupOverlay(Fstab *fstab)
 }
 #endif
 
-static void DoMountRequired(Fstab *fstab)
+static int DoMountRequired(Fstab *fstab)
 {
     if (GetBootSlots() >= SUPPORT_AB_PARTITION_UPDATE) {
         int snapshotRet = HookMgrExecute(GetBootStageHookMgr(), INIT_SNAPSHOT_ACTIVE,
@@ -136,34 +136,31 @@ static void DoMountRequired(Fstab *fstab)
         MountDmMergeOverlayAll();
     }
 #endif
-    if (ret < 0) {
-        INIT_LOGE("[startup_failed]Mount required partitions failed; please check fstab file %d",
-            FSTAB_MOUNT_FAILED);
-#ifndef STARTUP_INIT_TEST
-        abort();
-#endif
-    }
+    return ret;
 }
 
-static void MountRequiredPartitions(void)
+static int MountRequiredPartitions(void)
 {
     int requiredNum = 0;
     Fstab *fstab = LoadRequiredFstab();
-    char **devices = (fstab != NULL) ? GetRequiredDevices(*fstab, &requiredNum) : NULL;
-    if (devices != NULL && requiredNum > 0) {
-        int ret = StartUeventd(devices, requiredNum);
-        if (ret == 0) {
-            DoMountRequired(fstab);
-        }
+    if (fstab == NULL) {
+        INIT_LOGE("Required fstab is unavailable");
+        return -1;
+    }
+    char **devices = GetRequiredDevices(*fstab, &requiredNum);
+    if (devices == NULL || requiredNum <= 0) {
+        INIT_LOGE("Required devices are unavailable");
         FreeStringVector(devices, requiredNum);
-        devices = NULL;
         ReleaseFstab(fstab);
-        fstab = NULL;
+        return -1;
     }
-    if (fstab != NULL) {
-        ReleaseFstab(fstab);
-        fstab = NULL;
+    int ret = StartUeventd(devices, requiredNum);
+    if (ret == 0) {
+        ret = DoMountRequired(fstab);
     }
+    FreeStringVector(devices, requiredNum);
+    ReleaseFstab(fstab);
+    return ret;
 }
 
 #ifdef ASAN_DETECTOR
@@ -257,7 +254,14 @@ void SystemPrepare(long long upTimeInMicroSecs)
         return;
     }
 
-    MountRequiredPartitions();
+    if (MountRequiredPartitions() != 0) {
+        INIT_LOGE("[startup_failed]Mount required partitions failed; please check fstab file %d",
+            FSTAB_MOUNT_FAILED);
+#ifndef STARTUP_INIT_TEST
+        abort();
+#endif
+        return;
+    }
 
     StartSecondStageInit(upTimeInMicroSecs);
 }

@@ -111,17 +111,16 @@ static int MountToNewTarget(const char *target)
         char newMountPoint[PATH_MAX] = {0};
         if (snprintf_s(newMountPoint, PATH_MAX, PATH_MAX - 1, "%s%s", target, mountPoint) == -1) {
             INIT_LOGW("Cannot build new mount point for old mount point \" %s \"", mountPoint);
-            // Just ignore this one or return error?
-            continue;
+            ReleaseFstab(fstab);
+            return -1;
         }
         INIT_LOGV("new mount point is: %s", newMountPoint);
         if (!UnderBasicMountPoint(mountPoint)) {
             INIT_LOGV("Move mount %s to %s", mountPoint, newMountPoint);
             if (mount(mountPoint, newMountPoint, NULL, MS_MOVE, NULL) < 0) {
                 INIT_LOGE("failed mount moving %s to %s, err = %d", mountPoint, newMountPoint, errno);
-                // If one mount entry cannot move to new mountpoint, umount it.
-                umount2(mountPoint, MNT_FORCE);
-                continue;
+                ReleaseFstab(fstab);
+                return -1;
             }
         }
     }
@@ -154,37 +153,38 @@ int SwitchRoot(const char *newRoot)
     struct stat newRootStat = {};
     if (stat(newRoot, &newRootStat) != 0) {
         INIT_LOGE("failed get new root \" %s \" stat", newRoot);
-        FreeRootDir(oldRoot, oldRootStat.st_dev);
+        closedir(oldRoot);
         return -1;
     }
 
     if (oldRootStat.st_dev == newRootStat.st_dev) {
-        INIT_LOGW("Try to switch root in same device, skip switching root");
-        FreeRootDir(oldRoot, oldRootStat.st_dev);
-        return 0;
+        INIT_LOGE("New root must be on a different filesystem");
+        errno = EINVAL;
+        closedir(oldRoot);
+        return -1;
     }
     if (MountToNewTarget(newRoot) < 0) {
         INIT_LOGE("failed move mount to new root \" %s \" stat", newRoot);
-        FreeRootDir(oldRoot, oldRootStat.st_dev);
+        closedir(oldRoot);
         return -1;
     }
     // OK, we've done move mount.
     // Now mount new root.
     if (chdir(newRoot) < 0) {
         INIT_LOGE("failed change directory to %s, err = %d", newRoot, errno);
-        FreeRootDir(oldRoot, oldRootStat.st_dev);
+        closedir(oldRoot);
         return -1;
     }
 
     if (mount(newRoot, "/", NULL, MS_MOVE, NULL) < 0) {
         INIT_LOGE("failed mount moving %s to %s, err = %d", newRoot, "/", errno);
-        FreeRootDir(oldRoot, oldRootStat.st_dev);
+        closedir(oldRoot);
         return -1;
     }
 
     if (chroot(".") < 0) {
         INIT_LOGE("failed change root directory");
-        FreeRootDir(oldRoot, oldRootStat.st_dev);
+        closedir(oldRoot);
         return -1;
     }
     FreeRootDir(oldRoot, oldRootStat.st_dev);
