@@ -1,0 +1,15 @@
+# Copyright 2026 OpenDroidOS
+# SPDX-License-Identifier: Apache-2.0
+
+source_set("early_modules") {
+  sources = [ "early_modules.c" ]
+  include_dirs = [
+    "//base/startup/init/interfaces/innerkits/include",
+    "//base/startup/init/interfaces/innerkits/init_module_engine/include",
+    "//base/startup/init/services/log",
+  ]
+  deps = [
+    "//base/startup/init/services/log:init_log",
+    "//third_party/cJSON:cjson_static",
+  ]
+}
