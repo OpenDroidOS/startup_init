@@ -37,7 +37,10 @@ static int ValidModuleName(const char *name, size_t length)
 
 static int ReadModuleOrder(int directory, char **names, size_t *count)
 {
-    int fd = openat(directory, "modules.load", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    int fd = openat(directory, "modules.load.ohos", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0 && errno == ENOENT) {
+        fd = openat(directory, "modules.load", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    }
     if (fd < 0) {
         return -errno;
     }
@@ -126,14 +129,20 @@ static int LoadRamdiskModules(const char *path)
             } else if (!S_ISREG(status.st_mode)) {
                 result = -EINVAL;
             } else if (syscall(__NR_finit_module, fd, "", 0) != 0) {
-                result = -errno;
+                int loadError = errno;
+                if (loadError == EEXIST) {
+                    /* An earlier init stage may already have loaded this module. */
+                    INIT_LOGI("Required early module %s is already loaded", names[i]);
+                } else {
+                    result = -loadError;
+                }
             }
             close(fd);
         }
         if (result != 0) {
             INIT_LOGE("Required early module %s failed: %d", names[i], -result);
         } else {
-            INIT_LOGI("Loaded early module %s", names[i]);
+            INIT_LOGI("Required early module %s is available", names[i]);
         }
     }
     for (size_t i = 0; i < count; ++i) {
