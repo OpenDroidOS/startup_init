@@ -15,6 +15,10 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#if defined(__linux__)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #include "param_manager.h"
 #include "param_trie.h"
@@ -26,7 +30,9 @@
 #include "init_param.h"
 
 /**
- * Loading system parameter from /proc/cmdline by the following rules:
+ * Loading system parameters from /proc/cmdline by the following rules.
+ * Linux bootconfig supplies missing scalar boot values without replacing
+ * command-line parameters.
  *   1) reserved cmdline with or without ohos.boot. prefix listed in CmdlineIterator
         will be processed by the specified processor
  *   2) cmdline not listed in CmdlineIterator but prefixed with ohos.boot will be add by default
@@ -54,6 +60,7 @@ typedef struct CmdLineIteratorCtx {
     char *cmdline;
     bool gotSn;
     bool *matches;
+    bool onlyAdd;
 } CmdLineIteratorCtx;
 
 static int CommonDealFun(const char *name, const char *value)
@@ -183,6 +190,9 @@ static int MatchReserverCmdline(const NAME_VALUE_PAIR* nv, CmdLineIteratorCtx *c
 
 static const CmdLineInfo CMDLINES[] = {
     { "hardware", CommonDealFun },
+#if defined(__linux__)
+    { "usbcontroller", CommonDealFun },
+#endif
     { "bootgroup", CommonDealFun },
     { "reboot_reason", CommonDealFun },
     { "bootslots", CommonDealFun },
@@ -221,8 +231,158 @@ static void CmdlineIterator(const NAME_VALUE_PAIR *nv, void *context)
 
     // cmdline with prefix but not matched, add to param by default
     PARAM_LOGI("add proc cmdline param %s by default.", nv->name);
-    CommonDealFun(nv->name, nv->value);
+    if (ctx->onlyAdd) {
+        if (CheckParamName(nv->name, 0) == 0) {
+            (void)WriteParam(nv->name, nv->value, NULL, LOAD_PARAM_ONLY_ADD);
+        }
+    } else {
+        CommonDealFun(nv->name, nv->value);
+    }
 }
+
+#if defined(__linux__)
+#define BOOT_CONFIG_FILE "/proc/bootconfig"
+#define BOOT_CONFIG_MAX_BYTES (1024 * 1024)
+
+static char *ReadBootConfig(void)
+{
+    int fd = open(BOOT_CONFIG_FILE, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) {
+        return NULL;
+    }
+    size_t capacity = 4096;
+    size_t used = 0;
+    char *buffer = malloc(capacity);
+    if (buffer == NULL) {
+        close(fd);
+        return NULL;
+    }
+    while (1) {
+        if (used == capacity - 1) {
+            if (capacity == BOOT_CONFIG_MAX_BYTES + 1) {
+                char extra;
+                ssize_t count;
+                do {
+                    count = read(fd, &extra, 1);
+                } while (count < 0 && errno == EINTR);
+                if (count != 0) {
+                    goto error;
+                }
+                break;
+            }
+            size_t nextCapacity = capacity * 2;
+            if (nextCapacity > BOOT_CONFIG_MAX_BYTES + 1) {
+                nextCapacity = BOOT_CONFIG_MAX_BYTES + 1;
+            }
+            char *next = realloc(buffer, nextCapacity);
+            if (next == NULL) {
+                goto error;
+            }
+            buffer = next;
+            capacity = nextCapacity;
+        }
+        ssize_t count = read(fd, buffer + used, capacity - used - 1);
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count < 0 || (count > 0 && memchr(buffer + used, '\0', (size_t)count) != NULL)) {
+            goto error;
+        }
+        if (count == 0) {
+            break;
+        }
+        used += (size_t)count;
+    }
+    buffer[used] = '\0';
+    close(fd);
+    return buffer;
+error:
+    PARAM_LOGE("Failed to read bounded bootconfig data");
+    close(fd);
+    free(buffer);
+    return NULL;
+}
+
+static char *SkipBootConfigLine(char *cursor)
+{
+    char quote = '\0';
+    while (*cursor != '\0') {
+        if (quote != '\0') {
+            if (*cursor == quote) {
+                quote = '\0';
+            }
+        } else if (*cursor == '\'' || *cursor == '"') {
+            quote = *cursor;
+        } else if (*cursor == '\n') {
+            return cursor + 1;
+        }
+        cursor++;
+    }
+    return cursor;
+}
+
+static void LoadBootConfigParams(CmdLineIteratorCtx *ctx)
+{
+    char *data = ReadBootConfig();
+    if (data == NULL) {
+        return;
+    }
+    ctx->cmdline = data;
+    ctx->onlyAdd = true;
+    char *cursor = data;
+    while (*cursor != '\0') {
+        while (isspace((unsigned char)*cursor)) {
+            cursor++;
+        }
+        char *name = cursor;
+        while (*cursor != '\0' && *cursor != '=' && *cursor != '\n') {
+            cursor++;
+        }
+        if (*cursor != '=') {
+            if (*cursor == '\n') {
+                cursor++;
+            }
+            continue;
+        }
+        char *nameEnd = cursor++;
+        while (nameEnd > name && isspace((unsigned char)nameEnd[-1])) {
+            nameEnd--;
+        }
+        while (*cursor == ' ' || *cursor == '\t' || *cursor == '\r') {
+            cursor++;
+        }
+        if (*cursor != '\'' && *cursor != '"') {
+            cursor = SkipBootConfigLine(cursor);
+            continue;
+        }
+        char quote = *cursor++;
+        char *value = cursor;
+        char *valueEnd = strchr(value, quote);
+        if (valueEnd == NULL) {
+            break;
+        }
+        cursor = valueEnd + 1;
+        while (*cursor == ' ' || *cursor == '\t' || *cursor == '\r') {
+            cursor++;
+        }
+        char *next = SkipBootConfigLine(cursor);
+        /* /proc/bootconfig prints quoted scalars or arrays. Boot parameters
+         * are scalars; reject arrays and multiline values without reading
+         * their contents as additional parameter names. */
+        bool scalar = (*cursor == '\0' || *cursor == '\n') &&
+            memchr(value, '\n', (size_t)(valueEnd - value)) == NULL &&
+            memchr(value, '\r', (size_t)(valueEnd - value)) == NULL;
+        bool supported = strncmp(name, OHOS_CMDLINE_PARA_PREFIX, OHOS_CMDLINE_PARA_PREFIX_LEN) == 0 ||
+            strncmp(name, "androidboot.", sizeof("androidboot.") - 1) == 0;
+        cursor = next;
+        if (scalar && supported && nameEnd > name) {
+            NAME_VALUE_PAIR nv = { name, nameEnd, value, valueEnd };
+            CmdlineIterator(&nv, ctx);
+        }
+    }
+    free(data);
+}
+#endif
 
 static void GenerateSnByDefault(void)
 {
@@ -244,11 +404,16 @@ INIT_LOCAL_API int LoadParamFromCmdLine(void)
     CmdLineIteratorCtx ctx;
 
     ctx.gotSn = false;
+    ctx.onlyAdd = false;
     ctx.cmdline = ReadFileData(BOOT_CMD_LINE);
     PARAM_CHECK(ctx.cmdline != NULL, return -1, "failed read file %s", BOOT_CMD_LINE);
     bool matches[ARRAY_LENGTH(CMDLINES)] = {false};
     ctx.matches = matches;
     IterateNameValuePairs(ctx.cmdline, CmdlineIterator, (void *)(&ctx));
+    free(ctx.cmdline);
+#if defined(__linux__)
+    LoadBootConfigParams(&ctx);
+#endif
 
     // sn is critical, it must be specified
     if (!ctx.gotSn) {
@@ -256,7 +421,6 @@ INIT_LOCAL_API int LoadParamFromCmdLine(void)
         GenerateSnByDefault();
     }
 
-    free(ctx.cmdline);
     return 0;
 }
 
