@@ -43,6 +43,7 @@ qos_manager:x:1055:
 data_reserve:x:1065:
 ressched:x:1096:
 hiview:x:1201:
+faultloggerd:x:1202:
 hidumper_service:x:1212:
 shell:x:2000:hiview,task_manager_service,security_guard
 cache:x:2001:
